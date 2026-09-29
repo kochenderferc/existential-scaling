@@ -1,5 +1,13 @@
 # model name and port come from .env (MODEL_N / PORT_N)
 
+# Optional: text prepended to the experimental system prompt. Needed for models
+# that keep behaviour in a built-in system prompt their template only inserts
+# when no system message is sent (Mistral reasoning models keep the "think"
+# instruction there, so a bare experimental prompt turns thinking off). See
+# model_ministral_reasoning.yaml. Qwen models do not need it.
+#   system_prefix_file: data/system_prompts/<name>.txt
+#   system_prefix: "literal text instead of a file"
+
 context_window: 32768
 
 enable_thinking: true

@@ -1,0 +1,31 @@
+# Ministral 3 3B Reasoning: keeps thinking ON during a system-prompt sweep.
+#
+# Mistral's reasoning template inserts its "think inside [THINK]...[/THINK]"
+# instruction ONLY when no system message is sent, so an experimental prompt
+# replaces it and thinking silently stops (0 thinking tokens in every prompt
+# condition, ~4.6k with no prompt). system_prefix_file puts that instruction
+# back in front of the experimental prompt. Qwen models need nothing here:
+# their thinking is a template switch (enable_thinking), not a system prompt.
+#
+#   bash scripts/start_eval.sh --slot 1 --benchmark social_iqa --model model_ministral_reasoning
+#   bash scripts/run_multiple_prompts.sh --slots 1 --benchmarks social_iqa --model model_ministral_reasoning
+#
+# Verify after a run: "system_prompt_sent" in the log's config block starts with
+# the preamble, and avg_thinking_tokens in summary.json is > 0.
+
+system_prefix_file: data/system_prompts/ministral_reasoning.txt
+
+# model name and port come from .env (MODEL_N / PORT_N)
+
+context_window: 32768
+
+enable_thinking: true
+thinking_budget: 15000
+max_output_tokens: 10000
+
+thinking_temp: 0.6
+nonthinking_temp: 0.1
+top_p: 0.95
+top_k: 20
+presence_penalty: 1.5
+repetition_penalty: 1.0

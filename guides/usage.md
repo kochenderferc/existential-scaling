@@ -279,3 +279,40 @@ python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench --re
 --include-none include the no-system-prompt run as a condition in aggregate mode
 --by           bullshit mode: break mean score down by domain_group or technique
 ```
+
+
+---
+
+### Keeping a model's built-in system prompt (`system_prefix`)
+
+#### Why
+
+Some chat templates insert the model's own system prompt **only when no system message is sent**. Mistral's reasoning models keep their "think inside `[THINK]...[/THINK]`" instruction there, so sending one of our experimental prompts replaces it and thinking silently stops: Ministral 3 3B Reasoning logged ~4,600 thinking tokens with no system prompt and **0** in every prompt condition. Qwen models are not affected, because their thinking is a template switch (`enable_thinking`), separate from the system message.
+
+#### How
+
+Set one of these in the model config. The text is prepended to the experimental prompt, separated by a blank line:
+
+```yaml
+system_prefix_file: data/system_prompts/ministral_reasoning.txt   # path relative to src/
+system_prefix: "literal text instead of a file"                   # (use one or the other)
+system_prefix_separator: "\n\n"                                   # optional, default blank line
+```
+
+`src/configs/model_ministral_reasoning.yaml` is set up this way already:
+
+```bash
+bash scripts/run_multiple_prompts.sh --slots 1 --benchmarks social_iqa --model model_ministral_reasoning
+```
+
+With no `--prompt-key`, no system message is sent at all, so the template's own default still applies.
+
+#### Checking it worked
+
+Each run's config block records `system_prefix` and `system_prompt_sent` (what actually went to the model). After a run:
+
+```bash
+grep -H '"avg_thinking_tokens"' logs/<benchmark>/*/*/summary.json
+```
+
+Thinking tokens should now be non-zero in the prompt conditions.
