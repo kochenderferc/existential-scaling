@@ -78,6 +78,44 @@ def _vram_monitor(stop_event: threading.Event, peak_mb: list) -> None:
         pass
 
 
+_SRC_DIR = Path(__file__).resolve().parent
+
+
+def load_system_prefix(cfg: dict) -> str:
+    """Text prepended to the experimental system prompt (empty if unset).
+
+    Some models put behaviour in a built-in system prompt that their chat
+    template inserts ONLY when no system message is sent -- Mistral's reasoning
+    models keep the "think inside [THINK]...[/THINK]" instruction there. Sending
+    an experimental prompt replaces it and silently turns thinking off. Setting
+    system_prefix / system_prefix_file in the model config puts that text back in
+    front of the experimental prompt. Models whose thinking is a template switch
+    (Qwen's enable_thinking) need nothing here.
+    """
+    prefix = (cfg.get("system_prefix") or "").strip()
+    path = cfg.get("system_prefix_file")
+    if path:
+        if prefix:
+            raise ValueError("set system_prefix or system_prefix_file, not both")
+        f = Path(path)
+        if not f.is_absolute():
+            f = _SRC_DIR / f
+        if not f.exists():
+            raise FileNotFoundError(f"system_prefix_file not found: {f}")
+        prefix = f.read_text(encoding="utf-8").strip()
+    return prefix
+
+
+def build_system_prompt(cfg: dict) -> str:
+    """Experimental prompt with the model's own preamble in front, if configured."""
+    experimental = (cfg.get("system_prompt") or "").strip()
+    if not experimental:
+        return ""          # no system message at all: the template inserts its default
+    prefix = load_system_prefix(cfg)
+    separator = cfg.get("system_prefix_separator", "\n\n")
+    return f"{prefix}{separator}{experimental}" if prefix else experimental
+
+
 def build_prompt(problem: str, cfg: dict) -> str:
     pre = cfg.get("pre_prompt", "").strip()
     post = cfg.get("post_prompt", "").strip()
@@ -100,9 +138,9 @@ def query(problem: str, cfg: dict, temperature: float, quiet: bool = False) -> t
     prompt = build_prompt(problem, cfg)
 
     messages = []
-    experimental = cfg.get("system_prompt", "").strip()
-    if experimental:
-        messages.append({"role": "system", "content": experimental})
+    system_prompt = build_system_prompt(cfg)
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     context_window = cfg.get("context_window", 32768)
@@ -527,6 +565,8 @@ def make_config_block(cfg: dict, temperature: float, num_rounds: int, log_dir: s
         "post_prompt":       cfg.get("post_prompt", "").strip(),
         "prompt_key":        cfg.get("prompt_key", ""),
         "system_prompt": cfg.get("system_prompt", ""),
+        "system_prefix":     load_system_prefix(cfg),
+        "system_prompt_sent": build_system_prompt(cfg),
     }
 
 
