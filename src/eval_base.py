@@ -198,6 +198,7 @@ def query(problem: str, cfg: dict, temperature: float, quiet: bool = False) -> t
     showed_resp_header = False
     ttft: float | None = None
     seen_reasoning_content = False
+    unparsed: list[str] = []
 
     # printing out log metrics in case initial prompt procesing takes a while
     first_token_event = threading.Event()
@@ -219,8 +220,16 @@ def query(problem: str, cfg: dict, temperature: float, quiet: bool = False) -> t
                 continue
             data = line.decode("utf-8")
             if not data.startswith("data: ") or data[6:] == "[DONE]":
+                if not data.startswith("data: "):
+                    unparsed.append(data[:200])
                 continue
             chunk = json.loads(data[6:])
+            # A mid-stream failure arrives as an error object with no "choices",
+            # inside a 200 response, so raise_for_status() above does not see it.
+            # Raise so the caller logs it and retries instead of recording an
+            # empty answer as a wrong one.
+            if chunk.get("error"):
+                raise RuntimeError(f"server error in stream: {chunk['error']}")
             if chunk.get("usage"):
                 usage = chunk["usage"]
             # llama.cpp sends timings at the top level of the chunk, not in usage
@@ -339,6 +348,13 @@ def query(problem: str, cfg: dict, temperature: float, quiet: bool = False) -> t
             showed_resp_header = True
         answer += buf
         say(buf, end="", flush=True)
+
+    # Nothing generated, no usage and no finish_reason means the stream carried no
+    # completion at all. Without this the run records 0 tokens as a wrong answer,
+    # which looks like a model failure rather than a server or request problem.
+    if not usage and finish_reason is None and not thinking and not answer:
+        detail = " | ".join(unparsed[:3]) if unparsed else "no data lines in response"
+        raise RuntimeError(f"server returned no completion: {detail}")
 
     completion_tokens = usage.get("completion_tokens")
     prompt_ms = timings.get("prompt_ms")
