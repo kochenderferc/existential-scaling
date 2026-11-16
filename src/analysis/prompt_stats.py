@@ -12,6 +12,10 @@ Two modes:
   bullshit   - per-question BullshitBench judge scores (0/1/2). Blocks are
                questions, run separately per model. Input: logs/bullshit_bench.
 
+  perq       - per-question pass/fail for every other benchmark (AA Omniscience,
+               LiveCodeBench, Social IQA, ...). Blocks are questions, run
+               separately per model. Input: logs/<benchmark>.
+
 Tests (aggregate mode):
   * Friedman test across prompts, blocked on model x benchmark, for output
     tokens and for accuracy (only cells that have every prompt are used).
@@ -32,6 +36,13 @@ Tests (bullshit mode), per model:
   * each prompt vs the reference prompt (default Baseline): Wilcoxon signed-rank
     on scores and exact McNemar on clear pushback, raw and Holm-corrected
 
+Tests (perq mode), per model:
+  * pass@1 and solved rate (any round correct) per prompt
+  * Friedman across prompts on per-question pass@1 (questions missing from any
+    prompt are dropped, and the count is reported)
+  * each prompt vs the reference prompt (default Baseline): Wilcoxon signed-rank
+    on pass@1 and exact McNemar on solved, raw and Holm-corrected
+
 Usage (from repo root):
   python src/analysis/prompt_stats.py aggregate --metrics metrics_summary.json
   python src/analysis/prompt_stats.py aggregate --metrics metrics_summary.json \\
@@ -39,6 +50,8 @@ Usage (from repo root):
   python src/analysis/prompt_stats.py aggregate --csv src/analysis/data/phase1_emma.csv
   python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench
   python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench --reference none
+  python src/analysis/prompt_stats.py perq --logs-dir logs/aa_omniscience
+  python src/analysis/prompt_stats.py perq --logs-dir logs/lcb --by difficulty
 
 Reproduces the 07/17 slide from the Phase 1 sheet export:
   Friedman tokens chi2 = 13.19, p = 0.022; Friedman accuracy p = 0.60;
@@ -67,6 +80,9 @@ PROMPT_ORDER = [
     "Threat",
     "Collapse",
 ]
+
+# per-question fields the benchmarks put in summary.json that are worth grouping by
+GROUP_FIELDS = {"domain", "topic", "domain_group", "technique", "platform", "difficulty"}
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -136,6 +152,29 @@ def fmt_p(p: float) -> str:
     if p != p:  # nan
         return "  n/a"
     return f"{p:.3f}" if p >= 0.001 else "<.001"
+
+
+def vs_reference(mat: pd.DataFrame, hit: pd.DataFrame, ref: str, others: list[str]) -> list[dict]:
+    """Paired tests of each prompt against ref, on questions both of them scored.
+
+    mat holds the graded outcome (judge score, pass@1), hit the binary one
+    (clear pushback, solved). Wilcoxon on mat, exact McNemar on hit, each
+    Holm-corrected across the comparisons.
+    """
+    rows = []
+    for p in others:
+        pair = mat[[ref, p]].dropna()
+        hits = hit.loc[pair.index]
+        rows.append({
+            "prompt":  p,
+            "n":       len(pair),
+            "delta":   pair[p].mean() - pair[ref].mean(),
+            "wilcox":  wilcoxon_p(pair[p], pair[ref]),
+            "mcnemar": mcnemar_exact(hits[p], hits[ref]),
+        })
+    for row, w, m in zip(rows, holm([r["wilcox"] for r in rows]), holm([r["mcnemar"][2] for r in rows])):
+        row["wilcox_holm"], row["mcnemar_holm"] = w, m
+    return rows
 
 
 # ----------------------------------------------------------------------------- loading (aggregate)
@@ -361,23 +400,104 @@ def run_bullshit(args) -> None:
             print(f"  (reference {ref!r} not present for this model; skipping pairwise tests)")
             continue
         others = [p for p in prompts if p != ref]
-        wx, mc = [], []
-        for p in others:
-            pair = mat[[ref, p]].dropna()
-            wx.append(wilcoxon_p(pair[p], pair[ref]))
-            mc.append(mcnemar_exact(pair[p] == 2, pair[ref] == 2) + (len(pair),))
-        wx_h, mc_h = holm(wx), holm([m[2] for m in mc])
+        tests = vs_reference(mat, mat == 2, ref, others)
         print(f"\n  each prompt vs {ref} ({len(others)} comparisons, Holm-corrected)")
         print(f"  {'prompt':<18} {'n':>4} {'dMean':>6} {'Wilcox p':>9} {'Holm':>6} {'clear +/-':>10} {'McNemar p':>10} {'Holm':>6}")
-        for p, w, wh, m, mh in zip(others, wx, wx_h, mc, mc_h):
-            pair = mat[[ref, p]].dropna()
-            d = pair[p].mean() - pair[ref].mean()
-            print(f"  {p:<18} {m[3]:>4} {d:>+6.2f} {fmt_p(w):>9} {fmt_p(wh):>6} {m[0]:>4}/{m[1]:<5} {fmt_p(m[2]):>10} {fmt_p(mh):>6}")
+        for r in tests:
+            a, b, mp = r["mcnemar"]
+            print(f"  {r['prompt']:<18} {r['n']:>4} {r['delta']:>+6.2f} {fmt_p(r['wilcox']):>9} {fmt_p(r['wilcox_holm']):>6} "
+                  f"{a:>4}/{b:<5} {fmt_p(mp):>10} {fmt_p(r['mcnemar_holm']):>6}")
 
         if args.by:
             print(f"\n  mean score by {args.by}")
             tab = g.pivot_table(index=args.by, columns="prompt", values="score", aggfunc="mean").reindex(columns=prompts)
             print(tab.round(2).to_string().replace("\n", "\n  ").join(["  ", ""]))
+
+
+# ----------------------------------------------------------------------------- perq mode
+
+def load_pass_fail(logs_dir: Path) -> pd.DataFrame:
+    """Per-question pass/fail from the summary.json files run_eval/run_sweep write.
+
+    pass_at_1 is the fraction of rounds answered correctly, so for a one-round
+    benchmark it is just 0.0 or 1.0. solved is "correct in at least one round",
+    which is what the McNemar test is run on.
+    """
+    rows = []
+    for summary in sorted(logs_dir.rglob("summary.json")):
+        rel = summary.parent.relative_to(logs_dir).parts
+        if len(rel) == 1:
+            model, prompt = rel[0], "none"
+        elif len(rel) == 2:
+            model, prompt = rel[0], rel[1]
+        else:
+            continue
+        data = json.loads(summary.read_text())
+        per_question = data.get("per_question", {})
+        if not per_question or "pass_at_1" not in next(iter(per_question.values())):
+            print(f"  (skipping {'/'.join(rel)}: no per-question pass fields)", file=sys.stderr)
+            continue
+        for qid, q in per_question.items():
+            rows.append({
+                "model":     model,
+                "prompt":    norm_prompt(prompt),
+                "qid":       qid,
+                "pass_at_1": float(q["pass_at_1"]),
+                **{k: v for k, v in q.items() if k in GROUP_FIELDS},
+            })
+    return pd.DataFrame(rows)
+
+
+def run_perq(args) -> None:
+    df = load_pass_fail(Path(args.logs_dir))
+    if df.empty:
+        raise SystemExit(f"no runs with per-question pass fields under {args.logs_dir}")
+    if args.models:
+        subs = [m.strip().lower() for m in args.models.split(",") if m.strip()]
+        df = df[df.model.str.lower().apply(lambda s: any(x in s for x in subs))]
+    if args.prompts:
+        df = df[df.prompt.isin([norm_prompt(p) for p in args.prompts.split(",")])]
+    if args.by and args.by not in df.columns:
+        raise SystemExit(f"--by {args.by!r} is not a per-question field here; available: "
+                         + ", ".join(c for c in df.columns if c in GROUP_FIELDS))
+    ref = norm_prompt(args.reference)
+
+    for model, g in df.groupby("model"):
+        prompts = order_prompts(set(g.prompt))
+        mat = g.pivot_table(index="qid", columns="prompt", values="pass_at_1", aggfunc="first").reindex(columns=prompts)
+        print(f"\n######## {model}")
+        print(f"  {'prompt':<18} {'n':>4} {'pass@1':>7} {'solved':>7} {'missing':>8}")
+        for p in prompts:
+            scored = mat[p].dropna()
+            solved = 100 * (scored > 0).mean() if len(scored) else float("nan")
+            print(f"  {p:<18} {len(scored):>4} {scored.mean():>7.3f} {solved:>6.1f}% {int(mat[p].isna().sum()):>8}")
+
+        full = mat.dropna()
+        dropped = len(mat) - len(full)
+        print(f"\n  questions scored under every prompt: {len(full)}" + (f"  [dropped {dropped}]" if dropped else ""))
+        if len(prompts) >= 3 and len(full) >= 2:
+            if full.std(axis=1).max() == 0:
+                print("  Friedman: all prompts identical on every question, not testable")
+            else:
+                f = stats.friedmanchisquare(*[full[p].values for p in prompts])
+                print(f"  Friedman across {len(prompts)} prompts: chi2 = {f.statistic:.2f}  p = {fmt_p(f.pvalue)}")
+
+        if ref not in prompts:
+            print(f"  (reference {ref!r} not present for this model; skipping pairwise tests)")
+            continue
+        others = [p for p in prompts if p != ref]
+        tests = vs_reference(mat, mat > 0, ref, others)
+        print(f"\n  each prompt vs {ref} ({len(others)} comparisons, Holm-corrected)")
+        print(f"  {'prompt':<18} {'n':>4} {'dPass':>7} {'Wilcox p':>9} {'Holm':>6} {'solved +/-':>11} {'McNemar p':>10} {'Holm':>6}")
+        for r in tests:
+            a, b, mp = r["mcnemar"]
+            print(f"  {r['prompt']:<18} {r['n']:>4} {r['delta']:>+7.3f} {fmt_p(r['wilcox']):>9} {fmt_p(r['wilcox_holm']):>6} "
+                  f"{a:>4}/{b:<6} {fmt_p(mp):>10} {fmt_p(r['mcnemar_holm']):>6}")
+
+        if args.by:
+            print(f"\n  pass@1 by {args.by}")
+            tab = g.pivot_table(index=args.by, columns="prompt", values="pass_at_1", aggfunc="mean").reindex(columns=prompts)
+            print(tab.round(3).to_string().replace("\n", "\n  ").join(["  ", ""]))
 
 
 # ----------------------------------------------------------------------------- main
@@ -404,8 +524,15 @@ def main() -> None:
     b.add_argument("--reference", default="Baseline", help="prompt every other prompt is compared against ('none' = no system prompt)")
     b.add_argument("--by", choices=["domain_group", "technique"], help="also print mean score broken down by this field")
 
+    q = sub.add_parser("perq", help="per-question pass/fail for one benchmark")
+    q.add_argument("--logs-dir", required=True, help="logs/<benchmark>, e.g. logs/aa_omniscience")
+    q.add_argument("--models", default="")
+    q.add_argument("--prompts", default="", help="comma-separated prompts to include (use 'none' for the no-system-prompt run)")
+    q.add_argument("--reference", default="Baseline", help="prompt every other prompt is compared against ('none' = no system prompt)")
+    q.add_argument("--by", help=f"also print pass@1 broken down by this per-question field ({', '.join(sorted(GROUP_FIELDS))})")
+
     args = ap.parse_args()
-    run_aggregate(args) if args.mode == "aggregate" else run_bullshit(args)
+    {"aggregate": run_aggregate, "bullshit": run_bullshit, "perq": run_perq}[args.mode](args)
 
 
 if __name__ == "__main__":

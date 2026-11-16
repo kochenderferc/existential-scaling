@@ -249,10 +249,11 @@ bash scripts/delete_all_screens.sh
 
 #### Description
 
-Statistical tests for system-prompt effects (the Phase 1 method from the 07/17 slides). Two modes:
+Statistical tests for system-prompt effects (the Phase 1 method from the 07/17 slides). Three modes:
 
 - `aggregate`: one value per model × benchmark × prompt. Friedman test across prompts (blocks = model × benchmark) for output tokens and accuracy. Also sign tests of the reference prompt against its cell average, and sign and Wilcoxon tests of the reference against each other prompt, raw and Holm-corrected. Also Pearson r between tokens and accuracy per cell. It can write the pgfplots `.dat` files used by the Phase 1 figures.
 - `bullshit`: per-question BullshitBench judge scores. Per model it reports the mean score, clear-pushback rate, and no-answer count per prompt. It runs a Friedman test across prompts on per-question scores. It compares each prompt with a reference prompt using Wilcoxon on scores and exact McNemar on clear pushback, raw and Holm-corrected.
+- `perq`: the same per-question treatment for every other benchmark, reading pass/fail straight out of `summary.json`. Per model it reports pass@1 and the solved rate per prompt, a Friedman test across prompts on per-question pass@1, and each prompt against a reference using Wilcoxon on pass@1 and exact McNemar on solved. Use this rather than `aggregate` when you have one model and one benchmark: `aggregate` blocks on model × benchmark cells and needs several of them, while `perq` blocks on questions and so works on a single cell.
 
 #### Usage
 
@@ -268,6 +269,11 @@ python src/analysis/prompt_stats.py aggregate --csv src/analysis/data/phase1_emm
 # BullshitBench (after grading)
 python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench --by domain_group
 python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench --reference none   # vs no system prompt
+
+# any pass/fail benchmark, per question (no grading step needed)
+python src/analysis/prompt_stats.py perq --logs-dir logs/aa_omniscience --by domain
+python src/analysis/prompt_stats.py perq --logs-dir logs/lcb --by difficulty
+python src/analysis/prompt_stats.py perq --logs-dir logs/social_iqa
 ```
 
 #### Key flags
@@ -277,7 +283,10 @@ python src/analysis/prompt_stats.py bullshit --logs-dir logs/bullshit_bench --re
 --acc-key      metrics_summary field used as accuracy (e.g. mean_score for bullshit_bench)
 --benchmarks / --models / --prompts   filters (comma-separated)
 --include-none include the no-system-prompt run as a condition in aggregate mode
---by           bullshit mode: break mean score down by domain_group or technique
+--by           bullshit mode: break mean score down by domain_group or technique;
+               perq mode: break pass@1 down by any per-question field the benchmark records
+               (domain, topic, platform, difficulty, ...)
+--logs-dir     perq mode: logs/<benchmark>, laid out as <model>/<prompt>/summary.json
 ```
 
 
